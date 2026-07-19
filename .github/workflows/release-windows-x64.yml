@@ -1,0 +1,53 @@
+name: Release Windows x64
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release executable
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item `
+            target\x86_64-pc-windows-msvc\release\capslockrs.exe `
+            dist\capslockrs-windows-x64.exe
+
+      - name: Upload executable to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload `
+            "$env:TAG_NAME" `
+            "dist\capslockrs-windows-x64.exe" `
+            --clobber
