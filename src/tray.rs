@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, IDI_APPLICATION, LoadIconW, MF_CHECKED, MF_SEPARATOR,
+    DispatchMessageW, GetCursorPos, HICON, IDI_APPLICATION, LoadIconW, MF_CHECKED, MF_SEPARATOR,
     MF_STRING, MF_UNCHECKED, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
     PostMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassW, RegisterWindowMessageW,
     SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
@@ -30,6 +30,8 @@ use crate::{install, logging};
 
 const TRAY_CALLBACK: u32 = WM_APP + 100;
 const TRAY_ICON_ID: u32 = 1;
+const APP_ICON_RESOURCE_ID: usize = 1;
+const PAUSED_ICON_RESOURCE_ID: usize = 2;
 const CMD_PAUSE: usize = 1001;
 const CMD_AUTOSTART: usize = 1002;
 const CMD_EXIT: usize = 1003;
@@ -105,7 +107,7 @@ pub fn run(runtime: &InputRuntime, stop_event: windows::Win32::Foundation::HANDL
         return Err(anyhow!("注册 TaskbarCreated 消息失败"));
     }
     TASKBAR_CREATED.store(taskbar_created, Ordering::Release);
-    let mut icon_added = match add_icon(hwnd, runtime.is_paused()) {
+    let mut icon_added = match add_icon(hwnd, instance, runtime.is_paused()) {
         Ok(()) => true,
         Err(error) => {
             logging::log(format!("系统托盘尚未就绪，将每秒重试: {error:#}"));
@@ -128,7 +130,7 @@ pub fn run(runtime: &InputRuntime, stop_event: windows::Win32::Foundation::HANDL
             break;
         }
         if wait == WAIT_TIMEOUT {
-            if add_icon(hwnd, runtime.is_paused()).is_ok() {
+            if add_icon(hwnd, instance, runtime.is_paused()).is_ok() {
                 icon_added = true;
                 logging::log("系统托盘已就绪，图标添加成功");
             }
@@ -151,7 +153,7 @@ pub fn run(runtime: &InputRuntime, stop_event: windows::Win32::Foundation::HANDL
             }
 
             if MENU_REQUESTED.with(|flag| flag.replace(false)) {
-                match show_menu(hwnd, runtime) {
+                match show_menu(hwnd, instance, runtime) {
                     MenuResult::None => {}
                     MenuResult::IconMissing => {
                         delete_icon(hwnd);
@@ -164,7 +166,7 @@ pub fn run(runtime: &InputRuntime, stop_event: windows::Win32::Foundation::HANDL
                 icon_added = false;
                 logging::log("检测到任务栏已重新创建，正在恢复托盘图标");
             }
-            if !icon_added && add_icon(hwnd, runtime.is_paused()).is_ok() {
+            if !icon_added && add_icon(hwnd, instance, runtime.is_paused()).is_ok() {
                 icon_added = true;
                 logging::log("系统托盘图标添加成功");
             }
@@ -209,7 +211,7 @@ unsafe extern "system" fn window_proc(
     })
 }
 
-fn show_menu(hwnd: HWND, runtime: &InputRuntime) -> MenuResult {
+fn show_menu(hwnd: HWND, instance: HINSTANCE, runtime: &InputRuntime) -> MenuResult {
     // SAFETY: creates a menu owned and destroyed within this function.
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return MenuResult::None;
@@ -262,7 +264,7 @@ fn show_menu(hwnd: HWND, runtime: &InputRuntime) -> MenuResult {
         CMD_PAUSE => {
             let paused = !runtime.is_paused();
             runtime.set_paused(paused);
-            if update_tooltip(hwnd, paused).is_err() {
+            if update_icon_and_tooltip(hwnd, instance, paused).is_err() {
                 return MenuResult::IconMissing;
             }
         }
@@ -282,9 +284,8 @@ fn show_menu(hwnd: HWND, runtime: &InputRuntime) -> MenuResult {
     MenuResult::None
 }
 
-fn add_icon(hwnd: HWND, paused: bool) -> Result<()> {
-    // SAFETY: loads a shared stock application icon; it must not be destroyed.
-    let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.context("加载托盘图标失败")?;
+fn add_icon(hwnd: HWND, instance: HINSTANCE, paused: bool) -> Result<()> {
+    let icon = load_tray_icon(instance, paused)?;
     let mut data = tray_data(hwnd, paused);
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.hIcon = icon;
@@ -303,14 +304,35 @@ fn add_icon(hwnd: HWND, paused: bool) -> Result<()> {
     Ok(())
 }
 
-fn update_tooltip(hwnd: HWND, paused: bool) -> Result<()> {
+fn update_icon_and_tooltip(hwnd: HWND, instance: HINSTANCE, paused: bool) -> Result<()> {
     let mut data = tray_data(hwnd, paused);
-    data.uFlags = NIF_TIP | NIF_SHOWTIP;
+    data.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.hIcon = load_tray_icon(instance, paused)?;
     // SAFETY: modifies only this application's icon identifier.
     if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
         Ok(())
     } else {
         Err(anyhow!("更新托盘提示失败"))
+    }
+}
+
+fn load_tray_icon(instance: HINSTANCE, paused: bool) -> Result<HICON> {
+    let resource_id = if paused {
+        PAUSED_ICON_RESOURCE_ID
+    } else {
+        APP_ICON_RESOURCE_ID
+    };
+    // SAFETY: the resource identifier is packed like MAKEINTRESOURCEW and both icon resources
+    // are linked into this executable. LoadIconW returns a shared handle that must not be freed.
+    match unsafe { LoadIconW(Some(instance), PCWSTR(resource_id as *const u16)) } {
+        Ok(icon) => Ok(icon),
+        Err(error) => {
+            logging::log(format!(
+                "加载内嵌托盘图标资源 {resource_id} 失败，回退系统图标: {error}"
+            ));
+            // SAFETY: loads the shared stock application icon; it must not be destroyed.
+            unsafe { LoadIconW(None, IDI_APPLICATION) }.context("加载回退托盘图标失败")
+        }
     }
 }
 

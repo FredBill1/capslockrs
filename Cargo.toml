@@ -27,6 +27,9 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+embed-resource = "3.0"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
