@@ -11,7 +11,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -286,7 +286,7 @@ fn add_icon(hwnd: HWND, paused: bool) -> Result<()> {
     // SAFETY: loads a shared stock application icon; it must not be destroyed.
     let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.context("加载托盘图标失败")?;
     let mut data = tray_data(hwnd, paused);
-    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.hIcon = icon;
     // SAFETY: data is fully initialized and hwnd is live.
     if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
@@ -296,15 +296,16 @@ fn add_icon(hwnd: HWND, paused: bool) -> Result<()> {
         uVersion: NOTIFYICON_VERSION_4,
     };
     // SAFETY: switches callback semantics to NOTIFYICON_VERSION_4.
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
+    if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) }.as_bool() {
+        delete_icon(hwnd);
+        return Err(anyhow!("设置系统托盘图标版本失败"));
     }
     Ok(())
 }
 
 fn update_tooltip(hwnd: HWND, paused: bool) -> Result<()> {
     let mut data = tray_data(hwnd, paused);
-    data.uFlags = NIF_TIP;
+    data.uFlags = NIF_TIP | NIF_SHOWTIP;
     // SAFETY: modifies only this application's icon identifier.
     if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
         Ok(())
